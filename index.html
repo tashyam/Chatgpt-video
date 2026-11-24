@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#111827">
+<title>ToonForge 3D Studio</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#151d31;--line:#293550;--text:#f3f6ff;--muted:#aab6cf;--accent:#7c9cff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,-apple-system,Segoe UI,sans-serif}
+header{padding:18px 16px 12px;background:linear-gradient(135deg,#18294b,#101629);border-bottom:1px solid var(--line)}
+h1{font-size:23px;margin:0 0 4px}header p{margin:0;color:var(--muted);font-size:13px}
+main{max-width:900px;margin:auto;padding:14px;display:grid;gap:13px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:15px;padding:14px}
+h2{font-size:16px;margin:0 0 10px}
+label{display:block;color:var(--muted);font-size:13px;margin:10px 0 6px}
+textarea,input,select{width:100%;background:#0c1426;color:var(--text);border:1px solid #354362;border-radius:10px;padding:11px;font:inherit}
+textarea{min-height:112px;resize:vertical}
+button{border:0;border-radius:10px;padding:12px 14px;background:var(--accent);color:#081126;font-weight:750;font-size:14px;cursor:pointer}
+button.secondary{background:#293752;color:var(--text);border:1px solid #3a4b6d}
+button:disabled{opacity:.45;cursor:default}
+.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+#stage{position:relative;overflow:hidden;border-radius:13px;background:#101827;aspect-ratio:9/16;max-height:620px;margin:auto;width:min(100%,350px)}
+#stage canvas{display:block;width:100%;height:100%}
+#status{color:var(--muted);font-size:13px;margin-top:8px;min-height:18px}
+#progress{height:7px;background:#26324a;border-radius:10px;overflow:hidden;margin-top:8px}
+#bar{height:100%;width:0;background:#7c9cff;transition:width .1s}
+.small{font-size:12px;color:var(--muted);line-height:1.5}
+.scene-list{display:grid;gap:7px}
+.scene{padding:9px;border:1px solid var(--line);border-radius:9px;font-size:13px;color:var(--muted)}
+.scene b{color:var(--text)}
+footer{color:var(--muted);font-size:12px;text-align:center;padding:5px 10px 24px}
+a{color:#a9bdff}
+</style>
+</head>
+<body>
+<header><h1>🎬 ToonForge 3D Studio</h1><p>Turn a story into a procedural 3D cartoon short — runs in your browser.</p></header>
+<main>
+<section class="panel">
+<h2>1. Create your story</h2>
+<label for="story">Story / prompt</label>
+<textarea id="story">A brave little robot gets lost in a mysterious forest. It follows glowing butterflies, discovers an old wooden house, and finds a tiny puppy waiting inside. The robot and puppy become friends and walk home together.</textarea>
+<label for="character">Character type</label>
+<select id="character"><option value="robot">Cute robot</option><option value="person">Cartoon person</option><option value="bear">Cute bear</option></select>
+<label for="duration">Video length</label>
+<select id="duration"><option value="30">30 seconds</option><option value="45">45 seconds (experimental)</option><option value="60">60 seconds (experimental)</option></select>
+<div class="actions"><button id="plan">Generate scenes</button><button class="secondary" id="demo">Load demo story</button></div>
+<p class="small">The scene planner runs locally using simple text splitting and keyword detection. It does not call a paid AI service.</p>
+</section>
+<section class="panel">
+<h2>2. Preview your cartoon</h2>
+<div id="stage"><div style="padding:20px;color:#aab6cf;text-align:center">Your 3D preview will appear here.</div></div>
+<div id="status">Generate scenes to begin.</div><div id="progress"><div id="bar"></div></div>
+<div class="actions"><button id="preview" disabled>▶ Preview animation</button><button id="render" disabled>Render & export video</button></div>
+<label for="narration">Optional narration audio (MP3 / WAV)</label>
+<input id="narration" type="file" accept="audio/*">
+<p class="small">For reliable audio export, select a local narration file. Browser text-to-speech is not automatically captured in the exported video.</p>
+</section>
+<section class="panel">
+<h2>3. Generated storyboard</h2>
+<div id="scenes" class="scene-list"><div class="scene">No scenes generated yet.</div></div>
+</section>
+<section class="panel">
+<h2>What this version can and cannot do</h2>
+<p class="small"><b>Included:</b> procedural 3D character, simple environments, scene transitions, camera movement, captions, browser rendering and WebM export.</p>
+<p class="small"><b>Not included yet:</b> generative AI character art, advanced skeletal animation, automatic lip-sync, AI voice generation, photorealistic scenes, or guaranteed MP4 export. These need additional engines or services. This build prioritizes a genuinely free mobile prototype.</p>
+</section>
+</main>
+<footer>ToonForge 3D Studio · Free prototype · Best tested in current Chrome</footer>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+const $=id=>document.getElementById(id);
+let scenes=[],renderer,world,camera,actor,clock,raf=0,playing=false,sceneStart=0,activeScene=0;
+let outputCanvas,outputCtx,recorder,chunks=[],audioContext;
+const stage=$('stage');
+const palette=[
+ {sky:0x91c9ed,ground:0x548b55,accent:0xffd166},
+ {sky:0x26385f,ground:0x34445e,accent:0x83e8de},
+ {sky:0xffbd91,ground:0x8b6570,accent:0xffe08a},
+ {sky:0x9a9fe2,ground:0x5d578a,accent:0xf8b6dc},
+ {sky:0x273044,ground:0x3c4a43,accent:0xffcc70}
+];
+function splitStory(text,n){
+ const clean=text.replace(/\s+/g,' ').trim();
+ let parts=clean.match(/[^.!?]+[.!?]?/g)||[clean];
+ parts=parts.map(x=>x.trim()).filter(Boolean);
+ if(parts.length===0)return ['A new adventure begins.'];
+ const out=[];
+ for(let i=0;i<n;i++){
+   const start=Math.floor(i*parts.length/n),end=Math.max(start+1,Math.floor((i+1)*parts.length/n));
+   out.push(parts.slice(start,end).join(' ')||parts[i%parts.length]);
+ }
+ return out;
+}
+function classify(t){
+ t=t.toLowerCase();
+ if(/forest|tree|woods|jungle/.test(t))return 'forest';
+ if(/space|planet|moon|star|rocket/.test(t))return 'space';
+ if(/house|home|room|door|inside/.test(t))return 'house';
+ if(/city|street|road|town|building/.test(t))return 'city';
+ if(/beach|sea|ocean|water/.test(t))return 'beach';
+ return 'fantasy';
+}
+function makeScenes(){
+ const text=$('story').value.trim();if(!text){$('status').textContent='Please enter a story first.';return;}
+ const n=Number($('duration').value)>=60?8:Number($('duration').value)>=45?6:5;
+ const parts=splitStory(text,n);
+ scenes=parts.map((caption,i)=>({caption,kind:classify(caption),palette:palette[i%palette.length]}));
+ $('scenes').innerHTML=scenes.map((s,i)=>`<div class="scene"><b>Scene ${i+1} · ${s.kind}</b><br>${escapeHTML(s.caption)}</div>`).join('');
+ $('preview').disabled=false;$('render').disabled=false;
+ $('status').textContent=`${scenes.length} scenes ready. Tap Preview animation.`;
+ if(!renderer)init3D();setScene(0);
+}
+function escapeHTML(s){return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function init3D(){
+ const w=360,h=640;
+ renderer=new THREE.WebGLRenderer({antialias:true,alpha:false,preserveDrawingBuffer:true});
+ renderer.setPixelRatio(Math.min(devicePixelRatio||1,1.5));renderer.setSize(w,h,false);
+ renderer.outputColorSpace=THREE.SRGBColorSpace;
+ stage.innerHTML='';stage.appendChild(renderer.domElement);
+ world=new THREE.Scene();world.background=new THREE.Color(0x91c9ed);
+ camera=new THREE.PerspectiveCamera(38,w/h,.1,100);camera.position.set(0,3.2,10);camera.lookAt(0,1.5,0);
+ world.add(new THREE.HemisphereLight(0xffffff,0x586078,2));
+ const sun=new THREE.DirectionalLight(0xffffff,2.2);sun.position.set(-4,8,6);world.add(sun);
+ const ground=new THREE.Mesh(new THREE.PlaneGeometry(200,200),new THREE.MeshStandardMaterial({color:0x548b55,roughness:1}));
+ ground.rotation.x=-Math.PI/2;ground.position.y=-.04;world.add(ground);
+ actor=new THREE.Group();world.add(actor);
+ const mat=(color,roughness=.8)=>new THREE.MeshStandardMaterial({color,roughness});
+ const body=mat(0x4e9cff),skin=mat(0xffc79f),dark=mat(0x26334d),white=mat(0xffffff),gold=mat(0xffd166);
+ const type=$('character').value;
+ const torso=new THREE.Mesh(new THREE.CapsuleGeometry(.48,.75,5,10),type==='robot'?mat(0x8b9dbb):type==='bear'?mat(0x9a684b):body);
+ torso.position.y=1.35;actor.add(torso);
+ const head=new THREE.Mesh(new THREE.SphereGeometry(.48,24,16),type==='robot'?mat(0xbac9db):type==='bear'?mat(0x9a684b):skin);
+ head.position.y=2.25;head.scale.set(1,1,.9);actor.add(head);
+ if(type==='robot'){
+   const antenna=new THREE.Mesh(new THREE.CylinderGeometry(.035,.035,.35,8),dark);antenna.position.set(0,2.78,0);actor.add(antenna);
+   const tip=new THREE.Mesh(new THREE.SphereGeometry(.11,12,8),gold);tip.position.set(0,2.98,0);actor.add(tip);
+ }
+ for(const x of [-.18,.18]){
+   const eye=new THREE.Mesh(new THREE.SphereGeometry(.065,12,8),type==='robot'?mat(0x2362a0):dark);
+   eye.position.set(x,2.3,.42);actor.add(eye);
+ }
+ const legs=[];
+ for(const x of [-.22,.22]){
+   const leg=new THREE.Mesh(new THREE.CapsuleGeometry(.13,.52,4,8),dark);leg.position.set(x,.48,0);actor.add(leg);legs.push(leg);
+   const foot=new THREE.Mesh(new THREE.SphereGeometry(.19,12,8),type==='robot'?gold:dark);foot.scale.set(1,.55,1.5);foot.position.set(x,.16,.1);actor.add(foot);
+ }
+ const arms=[];
+ for(const x of [-.58,.58]){
+   const arm=new THREE.Mesh(new THREE.CapsuleGeometry(.12,.55,4,8),type==='robot'?mat(0x91a8c5):skin);
+   arm.position.set(x,1.45,0);arm.rotation.z=x<0?-.2:.2;actor.add(arm);arms.push(arm);
+ }
+ actor.userData={legs,arms,head};
+ addProps('fantasy');
+ clock=new THREE.Clock();
+ outputCanvas=document.createElement('canvas');outputCanvas.width=720;outputCanvas.height=1280;outputCtx=outputCanvas.getContext('2d');
+}
+function clearProps(){const remove=[];world.traverse(o=>{if(o.userData.generated)remove.push(o);});remove.forEach(o=>{o.parent.remove(o);if(o.geometry)o.geometry.dispose();});}
+function addProps(kind){
+ clearProps();
+ const groundColor=0x548b55;
+ if(kind==='forest'){
+  for(let i=0;i<12;i++){const x=(i%4-1.5)*2.5,z=-2-Math.floor(i/4)*2;
+   const trunk=new THREE.Mesh(new THREE.CylinderGeometry(.12,.18,1.3,7),new THREE.MeshStandardMaterial({color:0x69452e}));trunk.position.set(x,.65,z);trunk.userData.generated=true;world.add(trunk);
+   const top=new THREE.Mesh(new THREE.ConeGeometry(.85,2,8),new THREE.MeshStandardMaterial({color:i%2?0x28734b:0x39865a}));top.position.set(x,2,z);top.userData.generated=true;world.add(top);}
+ }else if(kind==='city'||kind==='house'){
+  for(let i=0;i<6;i++){const b=new THREE.Mesh(new THREE.BoxGeometry(1.4,2+(i%3),1.2),new THREE.MeshStandardMaterial({color:[0x687b9c,0xb17d70,0x647b73][i%3]}));b.position.set((i-2.5)*1.8,1+(i%3)/2,-3);b.userData.generated=true;world.add(b);}
+ }else if(kind==='space'){
+  world.background=new THREE.Color(0x111735);
+  for(let i=0;i<55;i++){const star=new THREE.Mesh(new THREE.SphereGeometry(.025+Math.random()*.035,6,6),new THREE.MeshBasicMaterial({color:0xffffff}));star.position.set((Math.random()-.5)*18,Math.random()*9-1,-5-Math.random()*8);star.userData.generated=true;world.add(star);}
+ }else if(kind==='beach'){
+  const water=new THREE.Mesh(new THREE.PlaneGeometry(40,40),new THREE.MeshStandardMaterial({color:0x3d9db4}));water.rotation.x=-Math.PI/2;water.position.set(0,-.02,-7);water.userData.generated=true;world.add(water);
+ }else{
+  for(let i=0;i<8;i++){const orb=new THREE.Mesh(new THREE.SphereGeometry(.25+(i%3)*.12,12,8),new THREE.MeshStandardMaterial({color:[0xffd166,0xff8fab,0x9bf6ff][i%3],emissive:[0x553300,0x441122,0x113344][i%3]}));orb.position.set((i-3.5)*1.3,1.5+(i%2)*1.5,-3-(i%3));orb.userData.generated=true;world.add(orb);}
+ }
+}
+function setScene(i){
+ if(!scenes.length)return;activeScene=i;const s=scenes[i];
+ world.background=new THREE.Color(s.palette.sky);
+ world.children.find(o=>o.geometry&&o.geometry.type==='PlaneGeometry'&&o.position.y<0)?.material.color.set(s.palette.ground);
+ addProps(s.kind);
+ $('status').textContent=`Scene ${i+1}/${scenes.length}: ${s.kind}`;
+}
+function drawFrame(t,caption){
+ renderer.render(world,camera);
+ const c=outputCanvas,ctx=outputCtx;
+ ctx.fillStyle='#111';ctx.fillRect(0,0,c.width,c.height);
+ ctx.drawImage(renderer.domElement,0,0,c.width,c.height);
+ const gradient=ctx.createLinearGradient(0,850,0,1280);gradient.addColorStop(0,'rgba(0,0,0,0)');gradient.addColorStop(1,'rgba(0,0,0,.78)');ctx.fillStyle=gradient;ctx.fillRect(0,800,720,480);
+ ctx.textAlign='center';ctx.fillStyle='#fff';ctx.strokeStyle='rgba(0,0,0,.8)';ctx.lineWidth=5;
+ const words=caption.split(' '),lines=[];let line='';
+ for(const word of words){const test=line?line+' '+word:word;if(ctx.measureText(test).width>620){lines.push(line);line=word;}else line=test;}if(line)lines.push(line);
+ ctx.font='bold 35px system-ui';const shown=lines.slice(0,3),startY=1110-(shown.length-1)*42;
+ shown.forEach((l,j)=>{ctx.strokeText(l,360,startY+j*45);ctx.fillText(l,360,startY+j*45);});
+}
+function animateAt(seconds){
+ const total=Number($('duration').value),per=total/scenes.length;
+ const idx=Math.min(scenes.length-1,Math.floor(seconds/per));
+ if(idx!==activeScene)setScene(idx);
+ const local=(seconds%per)/per;
+ actor.position.x=Math.sin(seconds*1.6)*.55;
+ actor.position.y=Math.abs(Math.sin(seconds*5))*.08;
+ actor.rotation.y=Math.sin(seconds*.8)*.18;
+ actor.userData.legs[0].rotation.x=Math.sin(seconds*7)*.5;
+ actor.userData.legs[1].rotation.x=-Math.sin(seconds*7)*.5;
+ actor.userData.arms[0].rotation.z=-.25+Math.sin(seconds*7)*.2;
+ actor.userData.arms[1].rotation.z=.25-Math.sin(seconds*7)*.2;
+ camera.position.x=Math.sin(seconds*.22)*.5;
+ camera.position.z=10+Math.sin(seconds*.35)*.35;
+ camera.lookAt(0,1.45,0);
+ drawFrame(seconds,scenes[idx].caption);
+}
+function preview(){
+ if(!scenes.length)return;playing=true;const start=performance.now(),duration=Number($('duration').value)*1000;
+ $('preview').disabled=true;$('render').disabled=true;
+ const tick=now=>{if(!playing)return;const elapsed=now-start;animateAt(Math.min(elapsed/1000,duration/1000));$('bar').style.width=Math.min(100,elapsed/duration*100)+'%';if(elapsed<duration)raf=requestAnimationFrame(tick);else{playing=false;$('preview').disabled=false;$('render').disabled=false;$('status').textContent='Preview complete.';}};
+ cancelAnimationFrame(raf);raf=requestAnimationFrame(tick);
+}
+async function renderVideo(){
+ if(!scenes.length)return;
+ if(!window.MediaRecorder||!outputCanvas.captureStream){$('status').textContent='This browser does not support video recording. Try current Chrome.';return;}
+ $('preview').disabled=true;$('render').disabled=true;$('status').textContent='Rendering video in this browser. Keep this tab open.';
+ chunks=[];const stream=outputCanvas.captureStream(24);
+ let audioEl=null;
+ if($('narration').files[0]){
+   audioEl=new Audio();audioEl.src=URL.createObjectURL($('narration').files[0]);audioEl.loop=false;
+   try{const ac=new AudioContext();const source=ac.createMediaElementSource(audioEl);const dest=ac.createMediaStreamDestination();source.connect(dest);source.connect(ac.destination);dest.stream.getAudioTracks().forEach(t=>stream.addTrack(t));await audioEl.play();}catch(e){$('status').textContent='Narration could not be captured; exporting without it.';}
+ }
+ const mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
+ recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:3500000});
+ recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
+ recorder.onstop=()=>{
+  const blob=new Blob(chunks,{type:'video/webm'}),url=URL.createObjectURL(blob),a=document.createElement('a');
+  a.href=url;a.download='toonforge-cartoon-short.webm';a.click();
+  $('status').textContent=`Export complete · ${(blob.size/1024/1024).toFixed(1)} MB · WebM format.`;
+  $('preview').disabled=false;$('render').disabled=false;$('bar').style.width='100%';
+  if(audioEl){audioEl.pause();URL.revokeObjectURL(audioEl.src);}
+  stream.getTracks().forEach(t=>t.stop());
+ };
+ recorder.start(500);
+ const total=Number($('duration').value),start=performance.now();
+ function frame(now){const elapsed=(now-start)/1000;const sec=Math.min(elapsed,total);animateAt(sec);$('bar').style.width=(sec/total*100)+'%';if(sec<total){requestAnimationFrame(frame);}else{setTimeout(()=>recorder.state==='recording'&&recorder.stop(),250);}}
+ requestAnimationFrame(frame);
+}
+$('plan').onclick=makeScenes;
+$('demo').onclick=()=>{$('story').value='A brave little robot gets lost in a mysterious forest. It follows glowing butterflies through the trees. Soon it discovers an old wooden house. The door slowly opens and a tiny puppy appears. The robot and puppy become friends and walk home together.';makeScenes();};
+$('preview').onclick=preview;$('render').onclick=renderVideo;
+makeScenes();
+</script>
+</body>
+</html>
