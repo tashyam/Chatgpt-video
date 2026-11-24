@@ -219,29 +219,98 @@ function preview(){
 }
 async function renderVideo(){
  if(!scenes.length)return;
- if(!window.MediaRecorder||!outputCanvas.captureStream){$('status').textContent='This browser does not support video recording. Try current Chrome.';return;}
- $('preview').disabled=true;$('render').disabled=true;$('status').textContent='Rendering video in this browser. Keep this tab open.';
- chunks=[];const stream=outputCanvas.captureStream(24);
- let audioEl=null;
- if($('narration').files[0]){
-   audioEl=new Audio();audioEl.src=URL.createObjectURL($('narration').files[0]);audioEl.loop=false;
-   try{const ac=new AudioContext();const source=ac.createMediaElementSource(audioEl);const dest=ac.createMediaStreamDestination();source.connect(dest);source.connect(ac.destination);dest.stream.getAudioTracks().forEach(t=>stream.addTrack(t));await audioEl.play();}catch(e){$('status').textContent='Narration could not be captured; exporting without it.';}
+ if(!window.MediaRecorder||!outputCanvas||!outputCanvas.captureStream){
+   $('status').textContent='Export unavailable: this browser does not support canvas video recording. Try the latest Chrome.';
+   return;
  }
- const mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
- recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:3500000});
- recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
- recorder.onstop=()=>{
-  const blob=new Blob(chunks,{type:'video/webm'}),url=URL.createObjectURL(blob),a=document.createElement('a');
-  a.href=url;a.download='toonforge-cartoon-short.webm';a.click();
-  $('status').textContent=`Export complete · ${(blob.size/1024/1024).toFixed(1)} MB · WebM format.`;
-  $('preview').disabled=false;$('render').disabled=false;$('bar').style.width='100%';
-  if(audioEl){audioEl.pause();URL.revokeObjectURL(audioEl.src);}
-  stream.getTracks().forEach(t=>t.stop());
- };
- recorder.start(500);
- const total=Number($('duration').value),start=performance.now();
- function frame(now){const elapsed=(now-start)/1000;const sec=Math.min(elapsed,total);animateAt(sec);$('bar').style.width=(sec/total*100)+'%';if(sec<total){requestAnimationFrame(frame);}else{setTimeout(()=>recorder.state==='recording'&&recorder.stop(),250);}}
- requestAnimationFrame(frame);
+ $('preview').disabled=true;$('render').disabled=true;
+ $('bar').style.width='0%';
+ $('status').textContent='Preparing video export… keep this tab open.';
+ let stream=null,audioEl=null,audioContextLocal=null;
+ try{
+   // Prefer broadly supported VP8 on Android; fall back to browser default WebM.
+   const candidates=['video/webm;codecs=vp8','video/webm;codecs=vp9','video/webm'];
+   let mimeType='';
+   for(const candidate of candidates){
+     if(MediaRecorder.isTypeSupported(candidate)){mimeType=candidate;break;}
+   }
+   if(!mimeType)throw new Error('This browser does not report support for a WebM recording format.');
+
+   stream=outputCanvas.captureStream(24);
+   if(!stream || stream.getVideoTracks().length===0)throw new Error('The browser did not provide a video track from the 3D canvas.');
+
+   // Optional narration. Export still works if audio capture is unavailable.
+   if($('narration').files[0]){
+     try{
+       audioEl=new Audio();
+       audioEl.src=URL.createObjectURL($('narration').files[0]);
+       audioEl.loop=false;
+       audioContextLocal=new (window.AudioContext||window.webkitAudioContext)();
+       if(audioContextLocal.state==='suspended')await audioContextLocal.resume();
+       const source=audioContextLocal.createMediaElementSource(audioEl);
+       const destination=audioContextLocal.createMediaStreamDestination();
+       source.connect(destination);
+       source.connect(audioContextLocal.destination);
+       destination.stream.getAudioTracks().forEach(track=>stream.addTrack(track));
+       await audioEl.play();
+     }catch(audioError){
+       $('status').textContent='Narration capture unavailable; continuing with video only…';
+       if(audioEl){try{audioEl.pause();}catch(e){}}
+     }
+   }
+
+   chunks=[];
+   recorder=new MediaRecorder(stream,{mimeType,videoBitsPerSecond:2500000});
+   recorder.ondataavailable=e=>{if(e.data&&e.data.size>0)chunks.push(e.data);};
+   recorder.onerror=e=>{
+     const message=e.error?.message||'Unknown MediaRecorder error';
+     $('status').textContent='Recording error: '+message;
+     $('preview').disabled=false;$('render').disabled=false;
+   };
+   recorder.onstop=()=>{
+     try{
+       const blob=new Blob(chunks,{type:recorder.mimeType||mimeType});
+       if(blob.size<1000){
+         $('status').textContent='Export failed: the browser produced an empty video. Try Chrome and render again.';
+       }else{
+         const url=URL.createObjectURL(blob);
+         $('status').innerHTML='Video ready ('+(blob.size/1024/1024).toFixed(2)+' MB). <a id="downloadVideo" href="'+url+'" download="toonforge-cartoon-short.webm" style="display:inline-block;margin-top:8px;padding:10px 14px;background:#7c9cff;color:#081126;border-radius:9px;font-weight:700;text-decoration:none">⬇ Download WebM video</a>';
+         const link=document.getElementById('downloadVideo');
+         link.addEventListener('click',()=>{setTimeout(()=>URL.revokeObjectURL(url),120000);},{once:true});
+       }
+     }catch(finalizeError){
+       $('status').textContent='Could not finalize video: '+(finalizeError.message||finalizeError);
+     }
+     $('preview').disabled=false;$('render').disabled=false;
+     if(stream)stream.getTracks().forEach(track=>track.stop());
+     if(audioEl){audioEl.pause();if(audioEl.src.startsWith('blob:'))URL.revokeObjectURL(audioEl.src);}
+     if(audioContextLocal)audioContextLocal.close().catch(()=>{});
+   };
+   recorder.start(1000);
+   $('status').textContent='Recording video… keep ToonForge open and do not switch tabs.';
+   const total=Number($('duration').value),started=performance.now();
+   function frame(now){
+     if(!recorder||recorder.state!=='recording')return;
+     const elapsed=(now-started)/1000;
+     const seconds=Math.min(elapsed,total);
+     animateAt(seconds);
+     $('bar').style.width=(seconds/total*100)+'%';
+     if(seconds<total){
+       requestAnimationFrame(frame);
+     }else{
+       $('status').textContent='Finishing video file…';
+       // Give MediaRecorder time to flush its final encoded chunk.
+       setTimeout(()=>{if(recorder&&recorder.state==='recording')recorder.stop();},1200);
+     }
+   }
+   requestAnimationFrame(frame);
+ }catch(error){
+   if(stream)stream.getTracks().forEach(track=>track.stop());
+   if(audioEl){audioEl.pause();if(audioEl.src.startsWith('blob:'))URL.revokeObjectURL(audioEl.src);}
+   if(audioContextLocal)audioContextLocal.close().catch(()=>{});
+   $('status').textContent='Export could not start: '+(error.message||String(error))+'. Try the latest Chrome, then retry.';
+   $('preview').disabled=false;$('render').disabled=false;
+ }
 }
 $('plan').onclick=makeScenes;
 $('demo').onclick=()=>{$('story').value='A brave little robot gets lost in a mysterious forest. It follows glowing butterflies through the trees. Soon it discovers an old wooden house. The door slowly opens and a tiny puppy appears. The robot and puppy become friends and walk home together.';makeScenes();};
@@ -249,4 +318,4 @@ $('preview').onclick=preview;$('render').onclick=renderVideo;
 makeScenes();
 </script>
 </body>
-</html>
+ </html>
